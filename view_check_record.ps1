@@ -36,7 +36,7 @@ foreach ($metaLine in $metaLines) {
     }
 
     # 2) Latest 5 records of this check task
-    $recSql = "select field1_data, field2_data, field3_data, field4_data, field5_data, field6_data, field7_data, field8_data, field9_data, field10_data, create_time from order_db.t_check_record where check_id = $checkId order by record_id desc limit 5"
+    $recSql = "select field1_data, field2_data, field3_data, field4_data, field5_data, field6_data, field7_data, field8_data, field9_data, field10_data, create_time from order_db.t_check_record where check_id = $checkId order by record_id desc limit 20"
     $recLines = docker @MYSQL $recSql 2>$null
     if ($LASTEXITCODE -ne 0) { Write-Host "Query record failed for $checkName"; continue }
 
