@@ -32,15 +32,22 @@ func main() {
 	orderConn := sqlx.MustNewConn(c.OrderDB)
 	accountConn := sqlx.MustNewConn(c.AccountDB)
 
-	// 修复要写订单主库(终态订单)/调 trade_itg(待支付订单), 只读核对不需要这些连接
+	// 修复要写订单主库(终态订单)/调 trade_itg(待支付订单), 核对记录也要写主库
+	// 只读核对且不写核对记录时不需要这些连接
 	var orderMasterConn sqlx.SqlConn
 	var tradeItgClient trade_itg_pb.TradeItgClient
-	if c.EnableRepair {
+	var checkRecord *checkRecordModel
+	if c.CheckRecord.CheckId > 0 || c.EnableRepair {
 		orderMasterConn = sqlx.MustNewConn(c.OrderMasterDB)
+	}
+	if c.EnableRepair {
 		tradeItgClient = trade_itg_pb.NewTradeItgClient(zrpc.MustNewClient(c.TradeItgRpcConfig).Conn())
 	}
+	if c.CheckRecord.CheckId > 0 {
+		checkRecord = newCheckRecordModel(orderMasterConn)
+	}
 
-	checker := NewChecker(c, orderConn, orderMasterConn, accountConn, tradeItgClient)
+	checker := NewChecker(c, orderConn, orderMasterConn, accountConn, tradeItgClient, checkRecord)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -57,6 +64,11 @@ func main() {
 		fmt.Printf("Mode:             window, %d ~ %d seconds\n", c.TimeStart, c.TimeEnd)
 	}
 	fmt.Printf("Enable repair:    %v\n", c.EnableRepair)
+	if c.CheckRecord.CheckId > 0 {
+		fmt.Printf("Check record:     check_id %d, check_name %s\n", c.CheckRecord.CheckId, c.CheckRecord.CheckName)
+	} else {
+		fmt.Printf("Check record:     disabled\n")
+	}
 
 	go func() {
 		ticker := time.NewTicker(time.Duration(c.CheckInterval) * time.Second)

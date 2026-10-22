@@ -23,6 +23,11 @@ TradeItgRpcConfig:
   Middlewares:
     Breaker: false  # 关闭客户端熔断
 
+CheckRecord:
+  # 每轮核对结束后写入 t_check_record, 字段名称定义在 t_check_meta
+  CheckId: 4559003
+  CheckName: order_check_day
+
 CheckInterval: 43200  # 每 12 小时一轮
 IsFullScan: true      # 忽略 TimeStart/TimeEnd, 按主键游标扫全表
 TimeStart: -300       # 全量模式下不使用, 保留字段默认值

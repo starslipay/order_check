@@ -23,8 +23,13 @@ TradeItgRpcConfig:
   Middlewares:
     Breaker: false  # 关闭客户端熔断
 
-CheckInterval: 1800   # 每 30 分钟核对一轮
-TimeStart: -3600      # 查最近 1 小时变更过的记录
+CheckRecord:
+  # 每轮核对结束后写入 t_check_record, 字段名称定义在 t_check_meta
+  CheckId: 4559002
+  CheckName: order_check_hour
+
+CheckInterval: 3600   # 每 1 小时核对一轮
+TimeStart: -3660      # 查最近 61 分钟变更过的记录(比周期间隔多 60s, 与上一轮窗口交叠, 保证右边界 30s 余量内的变更不丢)
 TimeEnd: -30          # 留 30 秒余量: 刚变更的订单/c2b单可能还未同步到从库, 避免误判
 IsFullScan: false
 EnableRepair: true    # 发现单边不一致自动修复: 待支付订单走trade_itg调账, 终态订单走主库条件更新

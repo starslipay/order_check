@@ -53,8 +53,21 @@ type CheckResult struct {
 	Err          string // 查询类错误(不影响其余批次)
 	Details      []Inconsistency
 	Dropped      int64 // 超过 maxDetailCount 未记录的明细数
-	StartTime    time.Time
-	EndTime      time.Time
+
+	// 参与核对的订单按交易状态分布, 与 t_check_meta 中字段1~4对应
+	OrdersTotal   int64 // 订单总数
+	OrdersSuccess int64 // 成功订单数
+	OrdersClosed  int64 // 失败订单数(已关闭)
+	OrdersInit    int64 // 待支付订单数
+
+	// 本轮修复动作计数, 与 t_check_meta 中字段5~6对应
+	RepairSupply int64 // 补单成功数(订单被补为成功, 含trade_itg补单和主库补成功)
+	RepairClose  int64 // 关单成功数(订单被关闭, 含trade_itg关单和主库关单)
+
+	StartTime     time.Time // 脚本核对开始时间
+	EndTime       time.Time // 脚本核对结束时间
+	DataStartTime time.Time // 核对数据开始时间(窗口模式下为查询窗口左边界)
+	DataEndTime   time.Time // 核对数据结束时间(窗口模式下为查询窗口右边界)
 }
 
 func newCheckResult(scenario string) *CheckResult {
@@ -81,6 +94,9 @@ func (r *CheckResult) String() string {
 	fmt.Fprintf(&b, "Skipped:      %d (待支付且无c2b转账单, 不处理)\n", r.Skipped)
 	fmt.Fprintf(&b, "Inconsistent: %d\n", r.Inconsistent)
 	fmt.Fprintf(&b, "Repaired:     %d\n", r.Repaired)
+	fmt.Fprintf(&b, "Orders:       total=%d success=%d closed=%d init=%d\n",
+		r.OrdersTotal, r.OrdersSuccess, r.OrdersClosed, r.OrdersInit)
+	fmt.Fprintf(&b, "Repair:       supply=%d close=%d\n", r.RepairSupply, r.RepairClose)
 	if r.Err != "" {
 		fmt.Fprintf(&b, "QueryError:   %s\n", r.Err)
 	}
@@ -105,10 +121,12 @@ type Checker struct {
 	orderMaster *orderModel                 // 主库写(终态订单修复用), EnableRepair=false 时为 nil
 	billModel   *c2bBillModel               // 从库读
 	tradeItg    trade_itg_pb.TradeItgClient // 待支付订单调账用(纯补单/纯关单), EnableRepair=false 时为 nil
+	checkRecord *checkRecordModel           // 主库写核对记录, 未配置 CheckRecord.CheckId 时为 nil
 	logger      logx.Logger
 }
 
-func NewChecker(cfg Config, orderConn, orderMasterConn, accountConn sqlx.SqlConn, tradeItg trade_itg_pb.TradeItgClient) *Checker {
+func NewChecker(cfg Config, orderConn, orderMasterConn, accountConn sqlx.SqlConn,
+	tradeItg trade_itg_pb.TradeItgClient, checkRecord *checkRecordModel) *Checker {
 	var orderMaster *orderModel
 	if orderMasterConn != nil {
 		orderMaster = newOrderModel(orderMasterConn)
@@ -119,6 +137,7 @@ func NewChecker(cfg Config, orderConn, orderMasterConn, accountConn sqlx.SqlConn
 		orderMaster: orderMaster,
 		billModel:   newC2BBillModel(accountConn),
 		tradeItg:    tradeItg,
+		checkRecord: checkRecord,
 		logger:      logx.WithContext(context.Background()),
 	}
 }
@@ -134,21 +153,52 @@ func (c *Checker) Run(ctx context.Context) *CheckResult {
 		c.orderFullScan(ctx, res, compared)
 		c.billFullScan(ctx, res, compared)
 	} else {
+		now := time.Now()
+		res.DataStartTime = now.Add(time.Duration(c.cfg.TimeStart) * time.Second)
+		res.DataEndTime = now.Add(time.Duration(c.cfg.TimeEnd) * time.Second)
 		c.orderWindow(ctx, res, compared)
 		c.billWindow(ctx, res, compared)
 	}
 
 	res.EndTime = time.Now()
+	c.saveRecord(ctx, res)
 	return res
+}
+
+// saveRecord 将本轮核对结果写入 t_check_record
+// 字段对应关系(t_check_meta 中的登记):
+//
+//	field1 订单总数 / field2 成功订单数 / field3 失败订单数 / field4 待支付订单数
+//	field5 补单成功数 / field6 关单成功数
+//	field7 脚本核对开始时间 / field8 脚本核对结束时间
+//	field9 核对数据开始时间 / field10 核对数据结束时间
+func (c *Checker) saveRecord(ctx context.Context, res *CheckResult) {
+	if c.checkRecord == nil {
+		return
+	}
+	rec := &CheckRecord{
+		CheckId:     c.cfg.CheckRecord.CheckId,
+		CheckName:   c.cfg.CheckRecord.CheckName,
+		Field1Data:  res.OrdersTotal,
+		Field2Data:  res.OrdersSuccess,
+		Field3Data:  res.OrdersClosed,
+		Field4Data:  res.OrdersInit,
+		Field5Data:  res.RepairSupply,
+		Field6Data:  res.RepairClose,
+		Field7Data:  recordTime(res.StartTime),
+		Field8Data:  recordTime(res.EndTime),
+		Field9Data:  recordTime(res.DataStartTime),
+		Field10Data: recordTime(res.DataEndTime),
+	}
+	if err := c.checkRecord.Insert(ctx, rec); err != nil {
+		c.logger.Errorf("save check record failed, check_id: %d, check_name: %s, err: %v",
+			rec.CheckId, rec.CheckName, err)
+	}
 }
 
 // orderWindow 增量核对: 窗口内有变更的订单 → 批量查对应c2b转账单 → 逐条比对
 func (c *Checker) orderWindow(ctx context.Context, res *CheckResult, compared map[string]struct{}) {
-	now := time.Now()
-	start := now.Add(time.Duration(c.cfg.TimeStart) * time.Second)
-	end := now.Add(time.Duration(c.cfg.TimeEnd) * time.Second)
-
-	rows, err := c.orderModel.FindByWindow(ctx, start, end)
+	rows, err := c.orderModel.FindByWindow(ctx, res.DataStartTime, res.DataEndTime)
 	if err != nil {
 		res.Err = fmt.Sprintf("query t_order failed: %v", err)
 		c.logger.Errorf("orderWindow: %v", err)
@@ -159,11 +209,7 @@ func (c *Checker) orderWindow(ctx context.Context, res *CheckResult, compared ma
 
 // billWindow 增量核对: 窗口内有变更的c2b转账单 → 批量查对应订单 → 逐条比对
 func (c *Checker) billWindow(ctx context.Context, res *CheckResult, compared map[string]struct{}) {
-	now := time.Now()
-	start := now.Add(time.Duration(c.cfg.TimeStart) * time.Second)
-	end := now.Add(time.Duration(c.cfg.TimeEnd) * time.Second)
-
-	rows, err := c.billModel.FindByWindow(ctx, start, end)
+	rows, err := c.billModel.FindByWindow(ctx, res.DataStartTime, res.DataEndTime)
 	if err != nil {
 		res.Err = fmt.Sprintf("query t_c2b_bill failed: %v", err)
 		c.logger.Errorf("billWindow: %v", err)
@@ -332,6 +378,17 @@ func (c *Checker) reconcileOne(ctx context.Context, order *OrderRow, bill *C2BBi
 		return
 	}
 
+	// 参与核对的订单按交易状态计数(写入 t_check_record 的字段1~4)
+	res.OrdersTotal++
+	switch order.TradeState {
+	case orderTradeStateSuccess:
+		res.OrdersSuccess++
+	case orderTradeStateClose:
+		res.OrdersClosed++
+	case orderTradeStateInit:
+		res.OrdersInit++
+	}
+
 	// c2b转账单不存在
 	if bill == nil {
 		switch order.TradeState {
@@ -366,6 +423,14 @@ func (c *Checker) reconcileOne(ctx context.Context, order *OrderRow, bill *C2BBi
 	}
 	if issue.Repaired {
 		res.Repaired++
+		switch issue.Kind {
+		case "order_init_bill_success", "order_closed_bill_success":
+			// 订单被补为成功: trade_itg补单 / 主库补成功
+			res.RepairSupply++
+		case "order_init_bill_closed", "order_success_bill_closed":
+			// 订单被关闭: trade_itg关单 / 主库关单
+			res.RepairClose++
+		}
 	}
 	res.Inconsistent++
 	res.add(issue)

@@ -23,6 +23,11 @@ TradeItgRpcConfig:
   Middlewares:
     Breaker: false  # 关闭客户端熔断
 
+CheckRecord:
+  # 每轮核对结束后写入 t_check_record, 字段名称定义在 t_check_meta
+  CheckId: 4559001
+  CheckName: order_check_minute
+
 CheckInterval: 60      # 每 60 秒核对一轮
 TimeStart: -300        # 查最近 5 分钟变更过的记录
 TimeEnd: -30           # 留 30 秒余量: 刚变更的订单/c2b单可能还未同步到从库, 避免误判

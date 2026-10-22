@@ -32,4 +32,15 @@ type Config struct {
 
 	// PageSize 每次 DB 分页/每批 IN 查询的记录数
 	PageSize int64 `json:",default=1000"`
+
+	// CheckRecord 核对记录写入配置: 每轮核对结束后写一条 t_check_record, 字段含义见 t_check_meta
+	CheckRecord CheckRecordConf `json:",optional"`
+}
+
+// CheckRecordConf 核对记录写入配置, 与 t_check_meta 中的登记信息对应
+type CheckRecordConf struct {
+	// CheckId 核对任务ID, 对应 t_check_meta.check_id; 为 0 时不写入核对记录
+	CheckId int64 `json:",default=0"`
+	// CheckName 核对名称, 对应 t_check_meta.check_name
+	CheckName string `json:",optional"`
 }
