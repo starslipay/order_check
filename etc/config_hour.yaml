@@ -1,0 +1,31 @@
+# 小时级: 扩大窗口补分钟级的漏, 核对订单(order_db.t_order)与c2b转账单(account_db.t_c2b_bill)状态一致性
+OrderDB:
+  # 只读核对, 统一走从库 mysql-slave1
+  DataSource: root:root123456@tcp(mysql-slave1:3306)/order_db?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s
+
+OrderMasterDB:
+  # 修复写入(终态订单关单/补成功)走主库, 仅 EnableRepair=true 时使用
+  DataSource: root:root123456@tcp(mysql-master:3306)/order_db?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s
+
+AccountDB:
+  # 只读核对, 统一走从库 mysql-slave1
+  DataSource: root:root123456@tcp(mysql-slave1:3306)/account_db?charset=utf8mb4&parseTime=True&loc=Local&timeout=5s&readTimeout=10s&writeTimeout=10s
+
+TradeItgRpcConfig:
+  # 待支付订单调账: c2b成功+订单初始→SupplyOrder补成功; c2b已关+订单初始→CloseOrder关订单
+  Etcd:
+    Hosts:
+    - etcd:2379  # etcd 集群节点1
+    - etcd2:2379 # etcd 集群节点2, 任一节点可用即可
+    - etcd3:2379 # etcd 集群节点3
+    Key: tradeitg.rpc  # 注册到etcd的服务key，客户端要对应这个key
+  Timeout: 10000  # 超时时间，单位毫秒
+  Middlewares:
+    Breaker: false  # 关闭客户端熔断
+
+CheckInterval: 1800   # 每 30 分钟核对一轮
+TimeStart: -3600      # 查最近 1 小时变更过的记录
+TimeEnd: -30          # 留 30 秒余量: 刚变更的订单/c2b单可能还未同步到从库, 避免误判
+IsFullScan: false
+EnableRepair: true    # 发现单边不一致自动修复: 待支付订单走trade_itg调账, 终态订单走主库条件更新
+PageSize: 1000
